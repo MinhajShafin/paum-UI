@@ -1,7 +1,9 @@
 "use client";
 
+import { useState } from "react";
 import MainLayout from "@/components/MainLayout";
 import { usePaumIoTContext } from "@/components/providers";
+import { paumiotApi } from "@/lib/api";
 import type { Device, SensorReading } from "@/lib/api";
 
 function formatRelativeTime(timestamp: number): string {
@@ -71,14 +73,56 @@ export default function Dashboard() {
     sensors,
     metrics,
     protocolStats,
+    rlStats,
+    status,
     loading,
+    refetch,
   } = usePaumIoTContext();
+
+  // State for Protocol Actions form
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
+  const [selectedProtocol, setSelectedProtocol] = useState("MQTT");
+  const [payload, setPayload] = useState('{"temp": 26.4}');
+  const [sending, setSending] = useState(false);
+  const [sendStatus, setSendStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   const isConnected = connectionState === "connected";
   const recentSensors = sensors.slice(0, 6);
 
   // Calculate load percentage (mock based on messages per second)
   const loadPercent = metrics ? Math.min(100, Math.round((metrics.messages_per_second / 100) * 100)) : 0;
+
+  // Handle sending sensor data
+  const handleSendData = async () => {
+    if (!isConnected) return;
+    
+    const deviceId = selectedDeviceId || devices[0]?.id;
+    if (!deviceId) {
+      setSendStatus({ type: "error", message: "No device selected" });
+      return;
+    }
+
+    setSending(true);
+    setSendStatus(null);
+
+    try {
+      const parsedPayload = JSON.parse(payload);
+      await paumiotApi.postSensorData({
+        device_id: deviceId,
+        ...parsedPayload,
+      });
+      setSendStatus({ type: "success", message: "Data sent successfully!" });
+      // Refetch data to show updated readings
+      await refetch();
+    } catch (err) {
+      setSendStatus({ 
+        type: "error", 
+        message: err instanceof Error ? err.message : "Failed to send data" 
+      });
+    } finally {
+      setSending(false);
+    }
+  };
 
   return (
     <MainLayout
@@ -118,9 +162,13 @@ export default function Dashboard() {
             <div className="small-row">
               <div className="flex-1">
                 <label className="text-muted label-sm">Device</label>
-                <select aria-label="Choose device">
+                <select 
+                  aria-label="Choose device"
+                  value={selectedDeviceId || devices[0]?.id || ""}
+                  onChange={(e) => setSelectedDeviceId(e.target.value)}
+                >
                   {devices.length === 0 ? (
-                    <option>No devices</option>
+                    <option value="">No devices</option>
                   ) : (
                     devices.map((d) => (
                       <option key={d.id} value={d.id}>
@@ -132,12 +180,16 @@ export default function Dashboard() {
               </div>
               <div className="w-200">
                 <label className="text-muted label-sm">Protocol</label>
-                <select aria-label="Choose protocol">
-                  <option>MQTT</option>
-                  <option>CoAP</option>
-                  <option>HTTP</option>
-                  <option>PRIoTP-R</option>
-                  <option>PRIoTP-U</option>
+                <select 
+                  aria-label="Choose protocol"
+                  value={selectedProtocol}
+                  onChange={(e) => setSelectedProtocol(e.target.value)}
+                >
+                  <option value="MQTT">MQTT</option>
+                  <option value="CoAP">CoAP</option>
+                  <option value="HTTP">HTTP</option>
+                  <option value="PRIoTP-R">PRIoTP-R</option>
+                  <option value="PRIoTP-U">PRIoTP-U</option>
                 </select>
               </div>
               <div className="w-160">
@@ -153,15 +205,28 @@ export default function Dashboard() {
               <textarea
                 placeholder='{"temp": 26.4}'
                 className="payload-area"
+                value={payload}
+                onChange={(e) => setPayload(e.target.value)}
               ></textarea>
 
               <div className="display-flex-col">
-                <button className="btn">Send Data</button>
-                <button className="btn ghost">Request Data</button>
+                <button 
+                  className="btn" 
+                  onClick={handleSendData}
+                  disabled={!isConnected || sending}
+                >
+                  {sending ? "Sending..." : "Send Data"}
+                </button>
+                <button className="btn ghost" disabled={!isConnected}>Request Data</button>
+                {sendStatus && (
+                  <div className={`mt-4 text-sm ${sendStatus.type === "success" ? "text-lime" : "text-danger"}`}>
+                    {sendStatus.message}
+                  </div>
+                )}
                 <div className="mt-auto">
                   <div className="text-muted label-sm">Target:</div>
                   <div className="target-highlight">
-                    /sensors/temp → {devices[0]?.id || "device"}
+                    /sensors/{selectedProtocol.toLowerCase()} → {selectedDeviceId || devices[0]?.id || "device"}
                   </div>
                   <div className="muted-small">
                     Last activity:{" "}
@@ -178,7 +243,7 @@ export default function Dashboard() {
         {/* Server Status */}
         <div className="card col-4">
           <h3>Server Status</h3>
-          <p className="sub">Middleware health & metrics</p>
+          <p className="sub">Middleware health & metrics{status?.version ? ` • v${status.version}` : ""}</p>
           <div className="status-grid mt-10">
             <div className="status">
               <div className="label">Uptime</div>
@@ -217,6 +282,14 @@ export default function Dashboard() {
               <small className="text-muted">HTTP</small>
               <strong className="text-muted">{protocolStats?.http || 0}</strong>
             </div>
+            <div className="justify-between mt-6">
+              <small className="text-muted">PRIoTP-R</small>
+              <strong className="text-muted">{protocolStats?.priotp_reliable || 0}</strong>
+            </div>
+            <div className="justify-between mt-6">
+              <small className="text-muted">PRIoTP-U</small>
+              <strong className="text-muted">{protocolStats?.priotp_unreliable || 0}</strong>
+            </div>
           </div>
         </div>
 
@@ -238,6 +311,87 @@ export default function Dashboard() {
                 <SensorLogEntry key={`${reading.device_id}-${reading.timestamp}-${idx}`} reading={reading} />
               ))
             )}
+          </div>
+        </div>
+
+        {/* RL Stats */}
+        <div className="card col-6">
+          <h3>RL Protocol Selector</h3>
+          <p className="sub">Reinforcement Learning statistics for adaptive protocol selection</p>
+          <div className="status-grid mt-10">
+            <div className="status">
+              <div className="label">Best Protocol</div>
+              <div className="value text-lime">{rlStats?.bandit_best_arm || "--"}</div>
+              <div className="muted-small">Current best arm</div>
+            </div>
+            <div className="status">
+              <div className="label">Accuracy</div>
+              <div className="value text-cyan">
+                {rlStats?.distillation_accuracy ? `${(rlStats.distillation_accuracy * 100).toFixed(0)}%` : "--"}
+              </div>
+              <div className="muted-small">Distillation</div>
+            </div>
+            <div className="status">
+              <div className="label">Bandwidth Saved</div>
+              <div className="value text-primary">
+                {rlStats?.bandwidth_savings ? `${(rlStats.bandwidth_savings * 100).toFixed(0)}%` : "--"}
+              </div>
+              <div className="muted-small">Optimization</div>
+            </div>
+          </div>
+          <div className="mt-14">
+            <h3 className="h3-cyan">Decision Tree</h3>
+            <div className="justify-between">
+              <small className="text-muted">Tree Version</small>
+              <strong>{rlStats?.tree_version || 0}</strong>
+            </div>
+            <div className="justify-between mt-6">
+              <small className="text-muted">Tree Nodes</small>
+              <strong>{rlStats?.tree_nodes || 0}</strong>
+            </div>
+            <div className="justify-between mt-6">
+              <small className="text-muted">Tree Memory</small>
+              <strong>{rlStats?.tree_memory || 0} bytes</strong>
+            </div>
+          </div>
+        </div>
+
+        {/* Bandit Stats */}
+        <div className="card col-6">
+          <h3>Experience Replay</h3>
+          <p className="sub">Multi-armed bandit learning statistics</p>
+          <div className="status-grid mt-10">
+            <div className="status">
+              <div className="label">Total Pulls</div>
+              <div className="value">{rlStats?.bandit_pulls || 0}</div>
+              <div className="muted-small">Arm selections</div>
+            </div>
+            <div className="status">
+              <div className="label">Overrides</div>
+              <div className="value text-cyan">{rlStats?.bandit_overrides || 0}</div>
+              <div className="muted-small">Exploration choices</div>
+            </div>
+            <div className="status">
+              <div className="label">Experiences</div>
+              <div className="value">{rlStats?.total_experiences || 0}</div>
+              <div className="muted-small">Total recorded</div>
+            </div>
+          </div>
+          <div className="mt-14">
+            <h3 className="h3-cyan">Learning Progress</h3>
+            <div className="justify-between">
+              <small className="text-muted">Significant Experiences</small>
+              <strong className="text-lime">{rlStats?.significant_experiences || 0}</strong>
+            </div>
+            <div className="justify-between mt-6">
+              <small className="text-muted">Learning Rate</small>
+              <strong>
+                {rlStats?.total_experiences 
+                  ? `${((rlStats.significant_experiences / rlStats.total_experiences) * 100).toFixed(1)}%`
+                  : "--"
+                }
+              </strong>
+            </div>
           </div>
         </div>
       </section>
